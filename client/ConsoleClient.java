@@ -74,7 +74,8 @@ public class ConsoleClient {
     }
 
     private static String jsonField(String json, String field) {
-        String key = """ + field + "":"";
+        char q = 34;
+        String key = q + field + q + ":" + q;
         int start = json.indexOf(key);
         if (start < 0) return null;
         start += key.length();
@@ -83,7 +84,7 @@ public class ConsoleClient {
         for (int i = start; i < json.length(); i++) {
             char c = json.charAt(i);
             if (escaped) { out.append(c); escaped = false; continue; }
-            if (c == '\') { escaped = true; out.append(c); continue; }
+            if (c == 92) { escaped = true; out.append(c); continue; }
             if (c == '"') return out.toString();
             out.append(c);
         }
@@ -121,7 +122,7 @@ public class ConsoleClient {
                     HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET().build();
                     HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                     if (response.statusCode() / 100 != 2) { Thread.sleep(1_000); continue; }
-                    for (String line : response.body().split("\R")) {
+                    for (String line : response.body().split(System.lineSeparator())) {
                         if (line.isBlank()) continue;
                         String id = jsonField(line, "id");
                         String message = jsonField(line, "message");
@@ -130,7 +131,9 @@ public class ConsoleClient {
                         if (message.equals("WELCOME|" + clientId)) { connected = true; continue; }
                         String prefix = "OUT|" + clientId + "|";
                         if (message.startsWith(prefix)) {
-                            String output = message.substring(prefix.length()).replace("\n", "
+                            String output = message.substring(prefix.length());
+                            String newlineToken = Character.toString((char) 92) + "n";
+                            output = output.replace(newlineToken, System.lineSeparator());
 ");
                             synchronized (PRINT_LOCK) { System.out.println(output); }
                         }

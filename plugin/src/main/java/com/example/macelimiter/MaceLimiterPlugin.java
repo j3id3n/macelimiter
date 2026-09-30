@@ -3,112 +3,79 @@ package com.example.macelimiter;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
+import org.bukkit.Chunk;
 import org.bukkit.Material;
 import org.bukkit.Sound;
-import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.World;
+import org.bukkit.block.BlockState;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
-import org.bukkit.World;
-import org.bukkit.Chunk;
-import org.bukkit.block.BlockState;
-import org.bukkit.inventory.Inventory;
-import org.bukkit.inventory.InventoryHolder;
-import org.bukkit.inventory.meta.BlockStateMeta;
-import org.bukkit.inventory.meta.BundleMeta;
-import org.bukkit.event.player.PlayerDropItemEvent;
-import java.util.ArrayList;
-import java.util.List;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.inventory.meta.BlockStateMeta;
+import org.bukkit.inventory.meta.BundleMeta;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.command.Command;
-import org.bukkit.command.CommandSender;
-import org.bukkit.command.ConsoleCommandSender;
+import org.bukkit.configuration.file.YamlConfiguration;
 
 import java.io.File;
 import java.io.IOException;
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Instant;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
-
-    private static final int MAX_MACES = 6;
+    private static final int DEFAULT_MAX_MACES = 6;
+    private static final String OWNER_NAME = "j31d";
     private static final String WARNING_MESSAGE =
-            "An excess Mace broke! Only 6 Maces can exist on this server.";
-    private static final int MAX_CLIENTS = 8;
-    private static final String DISCOVERY_TOPIC = "macelimiter-discovery-v5";
-    private static final String DEFAULT_RELAY_FALLBACKS =
-            "https://ntfy.sh,https://ntfy.tedomum.fr,https://ntfy.jae.fi,https://ntfy.adminforge.de,https://ntfy.envs.net";
-    private static final int MAX_LINE_LENGTH = 4096;
+            "An excess Mace broke! The server mace limit was exceeded.";
 
     private final Object fileLock = new Object();
     private File dataFile;
     private int lastPersistedCount = -1;
+    private int maxMaces = DEFAULT_MAX_MACES;
     private DiscordBridge discordBridge;
-
-
-    // ---------------------------------------------------------------------
-    // Lifecycle
-    // ---------------------------------------------------------------------
 
     @Override
     public void onEnable() {
-        getConfig().addDefault("discord.enabled", true);
-        getConfig().addDefault("discord.token", "");
-        getConfig().addDefault("discord.guild-id", "");
-        getConfig().options().copyDefaults(true);
-        saveConfig();
-
         if (!getDataFolder().exists() && !getDataFolder().mkdirs()) {
             getLogger().warning("Could not create plugin data folder.");
         }
         dataFile = new File(getDataFolder(), "mace_data.yml");
-        logPreviousCount();
+        loadState();
 
         getServer().getPluginManager().registerEvents(this, this);
         Bukkit.getScheduler().runTask(this, () -> persist(countAll()));
-
         startDiscordBot();
+
+        getLogger().info("MaceLimiter enabled. Mace limit: " + maxMaces + ".");
     }
 
     @Override
     public void onDisable() {
         stopDiscordBot();
-        // Final synchronous save.
         lastPersistedCount = -1;
         persistNow(countAllSafe());
     }
 
     private void startDiscordBot() {
-        if (!getConfig().getBoolean("discord.enabled", true)) {
-            getLogger().info("Discord integration disabled in config.");
-            return;
-        }
-        String token = getConfig().getString("discord.token", "").trim();
-        if (token.isEmpty()) {
-            getLogger().warning("Discord integration enabled, but discord.token is empty. Discord bot will not start.");
-            return;
-        }
-        try {
-            discordBridge = new DiscordBridge(this, token);
-            discordBridge.start();
-        } catch (Exception e) {
-            discordBridge = null;
-            getLogger().severe("Could not start Discord bot: " + e.getMessage());
-        }
+        discordBridge = new DiscordBridge(this);
+        discordBridge.start();
     }
 
     private void stopDiscordBot() {
@@ -122,10 +89,15 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         return callOnMainThread(this::countAll);
     }
 
+    String getDiscordMaceLimit() {
+        Integer limit = callOnMainThread(() -> maxMaces);
+        return limit == null ? "?" : String.valueOf(limit);
+    }
+
     String getDiscordStatus() {
         return callOnMainThread(() -> "Server: " + Bukkit.getServer().getName()
                 + "\nPlayers: " + Bukkit.getOnlinePlayers().size()
-                + "\nMaces: " + countAll() + "/" + MAX_MACES);
+                + "\nMaces: " + countAll() + "/" + maxMaces);
     }
 
     boolean dispatchDiscordCommand(String rawCommand) {
@@ -133,7 +105,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         if (command.startsWith("/")) command = command.substring(1);
         if (command.isEmpty() || command.length() > 4096 || !isEnabled()) return false;
         final String toRun = command;
-        Bukkit.getScheduler().runTask(this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), toRun));
+        Bukkit.getScheduler().runTask(this, () ->
+                Bukkit.dispatchCommand(Bukkit.getConsoleSender(), toRun));
         return true;
     }
 
@@ -141,34 +114,53 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
         if (command.getName().equalsIgnoreCase("maces")) {
             int count = countAll();
-            sender.sendMessage(Component.text("Maces: " + count + "/" + MAX_MACES, NamedTextColor.GOLD));
+            sender.sendMessage(Component.text(
+                    "Maces: " + count + "/" + maxMaces, NamedTextColor.GOLD));
             return true;
         }
 
-        if (command.getName().equalsIgnoreCase("macesetuptoken")) {
-            if (!(sender instanceof ConsoleCommandSender)) {
-                sender.sendMessage(Component.text("This command can only be used from the server console.", NamedTextColor.RED));
-                return true;
-            }
-            if (args.length != 1 || args[0].isBlank()) {
-                sender.sendMessage(Component.text("Usage: /macesetuptoken <discord-bot-token>", NamedTextColor.YELLOW));
+        if (command.getName().equalsIgnoreCase("maceset")) {
+            if (!(sender instanceof Player player)
+                    || !player.getName().equalsIgnoreCase(OWNER_NAME)) {
+                sender.sendMessage(Component.text(
+                        "Only j31d can use /maceset.", NamedTextColor.RED));
                 return true;
             }
 
-            getConfig().set("discord.token", args[0]);
-            saveConfig();
-            stopDiscordBot();
-            startDiscordBot();
-            sender.sendMessage(Component.text("Discord token saved and bot startup requested.", NamedTextColor.GREEN));
+            if (args.length != 1) {
+                sender.sendMessage(Component.text(
+                        "Usage: /maceset <3|4|6>", NamedTextColor.YELLOW));
+                return true;
+            }
+
+            int requested;
+            try {
+                requested = Integer.parseInt(args[0]);
+            } catch (NumberFormatException e) {
+                sender.sendMessage(Component.text(
+                        "Usage: /maceset <3|4|6>", NamedTextColor.YELLOW));
+                return true;
+            }
+
+            if (requested != 3 && requested != 4 && requested != 6) {
+                sender.sendMessage(Component.text(
+                        "The allowed mace limits are 3, 4, or 6.", NamedTextColor.YELLOW));
+                return true;
+            }
+
+            maxMaces = requested;
+            enforceGlobalLimit();
+            int count = countAll();
+            persistNow(count);
+
+            sender.sendMessage(Component.text(
+                    "Mace limit set to " + maxMaces + ". Current count: "
+                            + count + "/" + maxMaces + ".", NamedTextColor.GREEN));
             return true;
         }
 
         return false;
     }
-
-    // ---------------------------------------------------------------------
-    // Mace limiter
-    // ---------------------------------------------------------------------
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPickup(EntityPickupItemEvent event) {
@@ -177,21 +169,20 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         ItemStack stack = item.getItemStack();
         if (!containsMace(stack)) return;
 
-        int totalAfterPickup = countAll();
-        int excess = totalAfterPickup - MAX_MACES;
+        int excess = countAll() - maxMaces;
         if (excess <= 0) {
             schedulePersist();
             return;
         }
 
-        // The picked-up item is the newest mace source, so remove excess from it first.
-        int removed = removeMacesFromItem(stack, excess);
-        if (countMaces(stack) == 0) {
+        removeMacesFromItem(stack, excess);
+        if (countMaces(stack) <= 0) {
             event.setCancelled(true);
             item.remove();
         } else {
             item.setItemStack(stack);
         }
+
         notifyBroken(player);
         schedulePersist();
     }
@@ -202,21 +193,20 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         ItemStack dropped = item.getItemStack();
         if (!containsMace(dropped)) return;
 
-        int total = countAll();
-        int excess = total - MAX_MACES;
+        int excess = countAll() - maxMaces;
         if (excess <= 0) {
             schedulePersist();
             return;
         }
 
-        // Dropped maces are the newest maces. Break the dropped stack before touching inventory.
-        int removed = removeMacesFromItem(dropped, excess);
-        if (removed >= countMaces(dropped) + removed) {
+        removeMacesFromItem(dropped, excess);
+        if (countMaces(dropped) <= 0) {
             event.setCancelled(true);
             item.remove();
         } else {
             item.setItemStack(dropped);
         }
+
         notifyBroken(event.getPlayer());
         schedulePersist();
     }
@@ -224,19 +214,16 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventoryDrag(InventoryDragEvent event) {
         if (!(event.getWhoClicked() instanceof Player player)) return;
-        Bukkit.getScheduler().runTask(this, () -> { if (player.isOnline()) enforce(player); });
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (player.isOnline()) enforce(player);
+        });
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onInventoryClick(InventoryClickEvent event) {
-        if (!(event.getWhoClicked() instanceof Player player)) {
-            return;
-        }
-        // The click result is applied after the event; re-check on the next tick.
+        if (!(event.getWhoClicked() instanceof Player player)) return;
         Bukkit.getScheduler().runTask(this, () -> {
-            if (player.isOnline()) {
-                enforce(player);
-            }
+            if (player.isOnline()) enforce(player);
         });
     }
 
@@ -244,51 +231,123 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     public void onJoin(PlayerJoinEvent event) {
         Player player = event.getPlayer();
         Bukkit.getScheduler().runTask(this, () -> {
-            if (player.isOnline()) {
-                enforce(player);
-            }
+            if (player.isOnline()) enforce(player);
         });
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        // The quitting player is still "online" during this event; count next tick.
         schedulePersist();
     }
 
-    /** Removes newest maces from this player's accessible inventory, including nested storage. */
     private void enforce(Player player) {
-        int total = countAll();
-        int excess = total - MAX_MACES;
+        int excess = countAll() - maxMaces;
         if (excess <= 0) {
-            persist(total);
+            persist(countAll());
             return;
         }
 
         int removed = 0;
-
-        // Cursor is the newest source after inventory manipulation.
         ItemStack cursor = player.getItemOnCursor();
-        if (containsMace(cursor) && removed < excess) {
+        if (containsMace(cursor)) {
             removed += removeMacesFromItem(cursor, excess - removed);
-            player.setItemOnCursor(cursor.getAmount() > 0 && !isEmptyStorage(cursor) ? cursor : null);
+            player.setItemOnCursor(cursor != null && cursor.getAmount() > 0 ? cursor : null);
         }
 
-        // Then walk inventory from newest-looking slots backwards, recursively removing nested maces.
         if (removed < excess) {
-            PlayerInventory inv = player.getInventory();
-            ItemStack[] contents = inv.getContents();
+            PlayerInventory inventory = player.getInventory();
+            ItemStack[] contents = inventory.getContents();
             for (int i = contents.length - 1; i >= 0 && removed < excess; i--) {
                 ItemStack stack = contents[i];
                 if (!containsMace(stack)) continue;
                 removed += removeMacesFromItem(stack, excess - removed);
-                contents[i] = stack.getAmount() > 0 && (containsMace(stack) || !isEmptyStorage(stack)) ? stack : null;
+                contents[i] = stack != null && stack.getAmount() > 0 ? stack : null;
             }
-            inv.setContents(contents);
+            inventory.setContents(contents);
+        }
+
+        if (removed < excess) {
+            removed += removeMacesFromInventory(player.getEnderChest(), excess - removed);
         }
 
         if (removed > 0) notifyBroken(player);
+        if (removed < excess) removed += enforceGlobalLimit();
+
         persist(countAll());
+    }
+
+    private int enforceGlobalLimit() {
+        int excess = countAll() - maxMaces;
+        if (excess <= 0) return 0;
+
+        int removed = 0;
+
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            if (removed >= excess) break;
+
+            ItemStack cursor = player.getItemOnCursor();
+            if (containsMace(cursor)) {
+                removed += removeMacesFromItem(cursor, excess - removed);
+                player.setItemOnCursor(cursor != null && cursor.getAmount() > 0 ? cursor : null);
+            }
+
+            PlayerInventory inventory = player.getInventory();
+            ItemStack[] contents = inventory.getContents();
+            for (int i = contents.length - 1; i >= 0 && removed < excess; i--) {
+                ItemStack stack = contents[i];
+                if (!containsMace(stack)) continue;
+                removed += removeMacesFromItem(stack, excess - removed);
+                contents[i] = stack != null && stack.getAmount() > 0 ? stack : null;
+            }
+            inventory.setContents(contents);
+
+            if (removed < excess) {
+                removed += removeMacesFromInventory(
+                        player.getEnderChest(), excess - removed);
+            }
+        }
+
+        for (World world : Bukkit.getWorlds()) {
+            if (removed >= excess) break;
+
+            for (Item item : world.getEntitiesByClass(Item.class)) {
+                if (removed >= excess) break;
+                ItemStack stack = item.getItemStack();
+                if (!containsMace(stack)) continue;
+
+                removed += removeMacesFromItem(stack, excess - removed);
+                if (countMaces(stack) <= 0) item.remove();
+                else item.setItemStack(stack);
+            }
+
+            for (Chunk chunk : world.getLoadedChunks()) {
+                if (removed >= excess) break;
+
+                for (BlockState state : chunk.getTileEntities(false)) {
+                    if (!(state instanceof InventoryHolder holder)) continue;
+                    removed += removeMacesFromInventory(
+                            holder.getInventory(), excess - removed);
+                    if (removed >= excess) break;
+                }
+            }
+        }
+
+        return removed;
+    }
+
+    private int removeMacesFromInventory(Inventory inventory, int limit) {
+        if (inventory == null || limit <= 0) return 0;
+
+        int removed = 0;
+        ItemStack[] contents = inventory.getContents();
+        for (int i = contents.length - 1; i >= 0 && removed < limit; i--) {
+            ItemStack stack = contents[i];
+            if (!containsMace(stack)) continue;
+            removed += removeMacesFromItem(stack, limit - removed);
+            contents[i] = stack != null && stack.getAmount() > 0 ? stack : null;
+        }
+        inventory.setContents(contents);
+        return removed;
     }
 
     private void notifyBroken(Player player) {
@@ -303,22 +362,16 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     private int countAll() {
         int total = 0;
 
-        // Player inventory, cursor and ender chest.
-        for (Player p : Bukkit.getOnlinePlayers()) {
-            total += countInventory(p.getInventory());
-            total += countItem(p.getItemOnCursor());
-            total += countInventory(p.getEnderChest());
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            total += countInventory(player.getInventory());
+            total += countItem(player.getItemOnCursor());
+            total += countInventory(player.getEnderChest());
         }
 
         for (World world : Bukkit.getWorlds()) {
-            // Dropped maces still exist until they despawn or are picked up.
             for (Item item : world.getEntitiesByClass(Item.class)) {
                 total += countItem(item.getItemStack());
             }
-
-            // Scan loaded block inventories: chests, barrels, hoppers,
-            // shulkers, furnaces, brewing stands and InventoryHolder-based
-            // containers supplied by other plugins (including copper chests).
             for (Chunk chunk : world.getLoadedChunks()) {
                 for (BlockState state : chunk.getTileEntities(false)) {
                     if (state instanceof InventoryHolder holder) {
@@ -327,7 +380,6 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
                 }
             }
         }
-
         return total;
     }
 
@@ -339,38 +391,29 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    private int countPlayer(Player player) {
-        return countInventory(player.getInventory())
-                + countItem(player.getItemOnCursor())
-                + countInventory(player.getEnderChest());
-    }
-
     private int countInventory(Inventory inventory) {
-        if (inventory == null) {
-            return 0;
-        }
-
+        if (inventory == null) return 0;
         int total = 0;
-        for (ItemStack stack : inventory.getContents()) {
-            total += countItem(stack);
-        }
+        for (ItemStack stack : inventory.getContents()) total += countItem(stack);
         return total;
     }
 
-    /**
-     * Counts a mace directly and recursively searches nested storage items.
-     */
     private int countItem(ItemStack stack) {
         if (stack == null || stack.getType().isAir() || stack.getAmount() <= 0) return 0;
 
         int total = isMace(stack) ? stack.getAmount() : 0;
+
         if (stack.getItemMeta() instanceof BlockStateMeta meta) {
-            BlockState blockState = meta.getBlockState();
-            if (blockState instanceof InventoryHolder holder) total += countInventory(holder.getInventory());
+            BlockState state = meta.getBlockState();
+            if (state instanceof InventoryHolder holder) {
+                total += countInventory(holder.getInventory());
+            }
         }
+
         if (stack.getItemMeta() instanceof BundleMeta bundle) {
             for (ItemStack nested : bundle.getItems()) total += countItem(nested);
         }
+
         return total;
     }
 
@@ -382,13 +425,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         return countItem(stack);
     }
 
-    /**
-     * Removes up to limit maces from this stack, recursively from nested storage.
-     * Direct maces are removed before nested contents.
-     */
     private int removeMacesFromItem(ItemStack stack, int limit) {
         if (stack == null || limit <= 0 || stack.getAmount() <= 0) return 0;
-        int removed = 0;
 
         if (isMace(stack)) {
             int take = Math.min(limit, stack.getAmount());
@@ -396,15 +434,15 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             return take;
         }
 
+        int removed = 0;
+
         if (stack.getItemMeta() instanceof BundleMeta bundle) {
             List<ItemStack> updated = new ArrayList<>();
             for (ItemStack nested : bundle.getItems()) {
                 if (removed < limit && containsMace(nested)) {
                     removed += removeMacesFromItem(nested, limit - removed);
                 }
-                if (nested != null && nested.getAmount() > 0) {
-                    updated.add(nested);
-                }
+                if (nested != null && nested.getAmount() > 0) updated.add(nested);
             }
             bundle.setItems(updated);
             stack.setItemMeta(bundle);
@@ -413,29 +451,22 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         if (removed < limit && stack.getItemMeta() instanceof BlockStateMeta meta) {
             BlockState state = meta.getBlockState();
             if (state instanceof InventoryHolder holder) {
-                Inventory inv = holder.getInventory();
-                ItemStack[] contents = inv.getContents();
+                Inventory inventory = holder.getInventory();
+                ItemStack[] contents = inventory.getContents();
                 for (int i = contents.length - 1; i >= 0 && removed < limit; i--) {
                     ItemStack nested = contents[i];
                     if (!containsMace(nested)) continue;
                     removed += removeMacesFromItem(nested, limit - removed);
                     contents[i] = nested != null && nested.getAmount() > 0 ? nested : null;
                 }
-                inv.setContents(contents);
+                inventory.setContents(contents);
                 meta.setBlockState(state);
                 stack.setItemMeta(meta);
             }
         }
+
         return removed;
     }
-
-    private boolean isEmptyStorage(ItemStack stack) {
-        return stack == null || stack.getAmount() <= 0 || (!containsMace(stack) && stack.getType().isAir());
-    }
-
-    // ---------------------------------------------------------------------
-    // Persistence (mace_data.yml)
-    // ---------------------------------------------------------------------
 
     private void schedulePersist() {
         if (isEnabled()) {
@@ -443,24 +474,38 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         }
     }
 
-    private void logPreviousCount() {
-        if (dataFile.isFile()) {
-            YamlConfiguration yaml = YamlConfiguration.loadConfiguration(dataFile);
-            getLogger().info("Last recorded mace count: " + yaml.getInt("mace-count", 0)
-                    + " (updated " + yaml.getString("last-updated", "unknown") + ")");
+    private void loadState() {
+        maxMaces = DEFAULT_MAX_MACES;
+        if (!dataFile.isFile()) return;
+
+        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(dataFile);
+        int storedLimit = yaml.getInt("max-maces", DEFAULT_MAX_MACES);
+        if (storedLimit == 3 || storedLimit == 4 || storedLimit == 6) {
+            maxMaces = storedLimit;
         }
+
+        getLogger().info("Last recorded mace count: " + yaml.getInt("mace-count", 0)
+                + " (limit " + maxMaces + ", updated "
+                + yaml.getString("last-updated", "unknown") + ")");
     }
 
     private void persist(int count) {
-        if (count == lastPersistedCount) {
-            return;
-        }
+        if (count == lastPersistedCount) return;
         lastPersistedCount = count;
-        getLogger().info("Global mace count is now " + count + "/" + MAX_MACES);
+        writeState(count);
+        getLogger().info("Global mace count is now " + count + "/" + maxMaces);
+    }
 
+    private void persistNow(int count) {
+        lastPersistedCount = count;
+        writeState(count);
+        getLogger().info("Global mace count is now " + count + "/" + maxMaces);
+    }
+
+    private void writeState(int count) {
         YamlConfiguration yaml = new YamlConfiguration();
         yaml.set("mace-count", count);
-        yaml.set("max-maces", MAX_MACES);
+        yaml.set("max-maces", maxMaces);
         yaml.set("last-updated", Instant.now().toString());
         String data = yaml.saveToString();
 
@@ -469,18 +514,6 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         } else {
             writeFile(data);
         }
-    }
-
-    private void persistNow(int count) {
-        if (count == lastPersistedCount) {
-            return;
-        }
-        lastPersistedCount = count;
-        YamlConfiguration yaml = new YamlConfiguration();
-        yaml.set("mace-count", count);
-        yaml.set("max-maces", MAX_MACES);
-        yaml.set("last-updated", Instant.now().toString());
-        writeFile(yaml.saveToString());
     }
 
     private void writeFile(String data) {
@@ -500,7 +533,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         try {
             return Bukkit.getScheduler().callSyncMethod(this, task).get(5, TimeUnit.SECONDS);
         } catch (Exception e) {
-            getLogger().warning("Discord main-thread state check failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            getLogger().warning("Discord main-thread state check failed: "
+                    + e.getClass().getSimpleName() + ": " + e.getMessage());
             return null;
         }
     }

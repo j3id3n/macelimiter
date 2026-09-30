@@ -1,17 +1,17 @@
 name: MaceLimiter
 main: com.example.macelimiter.MaceLimiterPlugin
-version: '2.0.3'
+version: '2.1.0'
 api-version: '26.2'
-description: Global Heavy Mace limiter with a built-in Discord bot and /maces command.
+description: Global Heavy Mace limiter with a built-in Discord bot, /maces, and owner-only /maceset.
 authors: [MaceLimiter]
 commands:
   maces:
     description: Show the current global mace count
     usage: /maces
     permission: macelimiter.maces
-  macesetuptoken:
-    description: Configure the Discord bot token from the server console
-    usage: /macesetuptoken <discord-bot-token>
+  maceset:
+    description: Set the server-wide mace limit (3, 4, or 6)
+    usage: /maceset <3|4|6>
 permissions:
   macelimiter.maces:
     description: Allows players to view the global mace count

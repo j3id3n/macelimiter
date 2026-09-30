@@ -25,6 +25,10 @@ jobs:
       - name: Build macelimiter.jar
         run: mvn -B -f plugin/pom.xml clean package
 
+      - name: Validate relay architecture
+        run: |
+          ! grep -R -n -E "ServerSocket|new Socket\(|InetSocketAddress|console\.port|console\.bind-address" plugin/src/main/java client/ConsoleClient.java
+
       - name: Build console.jar
         run: |
           mkdir -p client/out
@@ -42,6 +46,11 @@ jobs:
         with:
           name: console
           path: console.jar
+
+      - name: Verify release artifacts
+        run: |
+          test -s plugin/target/macelimiter.jar
+          test -s console.jar
 
       - name: Publish GitHub release
         if: startsWith(github.ref, 'refs/tags/v')

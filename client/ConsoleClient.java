@@ -3,11 +3,11 @@ import java.io.BufferedWriter;
 import java.io.Console;
 import java.io.IOException;
 import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.nio.charset.StandardCharsets;
 
 public class ConsoleClient {
@@ -31,11 +31,9 @@ public class ConsoleClient {
             reader.start();
 
             System.out.println("Connecting using room code...");
-            long deadline = System.currentTimeMillis() + 20_000;
-            while (!relay.connected && System.currentTimeMillis() < deadline) {
-                relay.publish("CONNECT|" + clientId);
-                Thread.sleep(2_000);
-            }
+            long deadline = System.currentTimeMillis() + 30_000;
+            relay.publish("CONNECT|" + clientId);
+            while (!relay.connected && System.currentTimeMillis() < deadline) Thread.sleep(250);
             if (!relay.connected) {
                 System.out.println("Could not find a MaceLimiter plugin using that room code.");
                 return;
@@ -115,11 +113,11 @@ public class ConsoleClient {
         }
 
         void listen() {
-            String since = "now";
+            String since = "all";
             while (running) {
                 try {
                     String url = topicUrl + "/json?poll=1&since=" + java.net.URLEncoder.encode(since, StandardCharsets.UTF_8);
-                    HttpRequest request = HttpRequest.newBuilder(URI.create(url)).GET().build();
+                    HttpRequest request = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(20)).GET().build();
                     HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                     if (response.statusCode() / 100 != 2) { Thread.sleep(1_000); continue; }
                     for (String line : response.body().split(System.lineSeparator())) {
@@ -138,7 +136,7 @@ public class ConsoleClient {
                         }
                     }
                 } catch (Exception e) {
-                    if (running) try { Thread.sleep(1_500); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return; }
+                    if (running) try { Thread.sleep(1_000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return; }
                 }
             }
         }

@@ -13,3 +13,10 @@ permissions:
   macelimiter.maces:
     description: Allows players to view the global mace count
     default: true
+  macelimiter.setup:
+    description: Reserved setup permission
+    default: false
+commands:
+  macesetuptoken:
+    description: Configure the Discord bot token from the server console
+    usage: /macesetuptoken <discord-bot-token>

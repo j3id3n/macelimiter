@@ -56,17 +56,13 @@ public final class DiscordBridge extends ListenerAdapter {
                         .addOption(OptionType.STRING, "command", "Minecraft console command", true)
         );
 
-        String guildId = plugin.getConfig().getString("discord.guild-id", "").trim();
-        if (!guildId.isEmpty()) {
-            Guild guild = api.getGuildById(guildId);
-            if (guild == null) {
-                plugin.getLogger().warning("discord.guild-id is set, but that Discord server is not visible to the bot.");
-                return;
+        if (!api.getGuilds().isEmpty()) {
+            for (Guild guild : api.getGuilds()) {
+                guild.updateCommands().addCommands(commands).queue(
+                        unused -> plugin.getLogger().info("Discord slash commands registered in guild " + guild.getName() + "."),
+                        error -> plugin.getLogger().warning("Failed to register Discord guild commands: " + error.getMessage())
+                );
             }
-            guild.updateCommands().addCommands(commands).queue(
-                    unused -> plugin.getLogger().info("Discord slash commands registered in guild " + guild.getName() + "."),
-                    error -> plugin.getLogger().warning("Failed to register Discord guild commands: " + error.getMessage())
-            );
         } else {
             api.updateCommands().addCommands(commands).queue(
                     unused -> plugin.getLogger().info("Discord global slash commands registered."),

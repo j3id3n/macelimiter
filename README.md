@@ -14,7 +14,6 @@ After the first start, edit `plugins/MaceLimiter/config.yml`:
 discord:
   enabled: true
   token: "YOUR_DISCORD_BOT_TOKEN"
-  guild-id: ""
 ```
 
 Set `guild-id` to your Discord server ID for immediate slash-command registration. Leave it blank for global commands.

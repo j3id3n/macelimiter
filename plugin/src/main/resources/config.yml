@@ -1,4 +1,3 @@
 discord:
   enabled: true
   token: ""
-  guild-id: ""

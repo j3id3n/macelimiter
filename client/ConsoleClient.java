@@ -134,7 +134,6 @@ public class ConsoleClient {
                             String output = message.substring(prefix.length());
                             String newlineToken = Character.toString((char) 92) + "n";
                             output = output.replace(newlineToken, System.lineSeparator());
-");
                             synchronized (PRINT_LOCK) { System.out.println(output); }
                         }
                     }

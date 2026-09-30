@@ -99,16 +99,16 @@ class MaceBot(discord.Client):
     def __init__(self):
         super().__init__(intents=discord.Intents.none())
         self.tree = app_commands.CommandTree(self)
-        self.http = None
+        self.web_session = None
         self.bridge = MaceBridge()
 
     async def setup_hook(self):
         await self.tree.sync()
-        self.http = aiohttp.ClientSession()
+        self.web_session = aiohttp.ClientSession()
 
     async def close(self):
-        if self.http:
-            await self.http.close()
+        if self.web_session:
+            await self.web_session.close()
         await super().close()
 
 bot = MaceBot()
@@ -121,7 +121,7 @@ def authorized(interaction):
     return any(role.id in ALLOWED_ROLE_IDS for role in interaction.user.roles)
 
 async def target():
-    result = await bot.bridge.discover(bot.http)
+    result = await bot.bridge.discover(bot.web_session)
     if result is None:
         raise RuntimeError("no MaceLimiter target server is online")
     return result
@@ -133,7 +133,7 @@ async def maces(interaction):
     await interaction.response.defer(ephemeral=True)
     try:
         t = await target()
-        count = await bot.bridge.count(bot.http, t)
+        count = await bot.bridge.count(bot.web_session, t)
         await interaction.followup.send(f'🟢 **{t["name"]}** — Maces: **{count}/6**', ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ {e}", ephemeral=True)
@@ -148,7 +148,7 @@ async def mc(interaction, command: str):
     await interaction.response.defer(ephemeral=True)
     try:
         t = await target()
-        await bot.bridge.command(bot.http, t, command)
+        await bot.bridge.command(bot.web_session, t, command)
         await interaction.followup.send(f'✅ Sent to **{t["name"]}**: /{command.lstrip("/")}', ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ {e}", ephemeral=True)

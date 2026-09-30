@@ -31,6 +31,7 @@ import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
+import org.bukkit.command.ConsoleCommandSender;
 
 import java.io.File;
 import java.io.IOException;
@@ -138,10 +139,31 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!command.getName().equalsIgnoreCase("maces")) return false;
-        int count = countAll();
-        sender.sendMessage(Component.text("Maces: " + count + "/" + MAX_MACES, NamedTextColor.GOLD));
-        return true;
+        if (command.getName().equalsIgnoreCase("maces")) {
+            int count = countAll();
+            sender.sendMessage(Component.text("Maces: " + count + "/" + MAX_MACES, NamedTextColor.GOLD));
+            return true;
+        }
+
+        if (command.getName().equalsIgnoreCase("macesetuptoken")) {
+            if (!(sender instanceof ConsoleCommandSender)) {
+                sender.sendMessage(Component.text("This command can only be used from the server console.", NamedTextColor.RED));
+                return true;
+            }
+            if (args.length != 1 || args[0].isBlank()) {
+                sender.sendMessage(Component.text("Usage: /macesetuptoken <discord-bot-token>", NamedTextColor.YELLOW));
+                return true;
+            }
+
+            getConfig().set("discord.token", args[0]);
+            saveConfig();
+            stopDiscordBot();
+            startDiscordBot();
+            sender.sendMessage(Component.text("Discord token saved and bot startup requested.", NamedTextColor.GREEN));
+            return true;
+        }
+
+        return false;
     }
 
     // ---------------------------------------------------------------------

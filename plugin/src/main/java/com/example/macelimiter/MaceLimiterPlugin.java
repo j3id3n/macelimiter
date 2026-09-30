@@ -43,6 +43,7 @@ import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -539,6 +540,10 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             }
         }
         return id;
+    }
+
+    private String row(int id, String kind, String owner, String world, int x, int y, int z, String path) {
+        return id + "~" + kind + "~" + owner + "~" + world + "~" + x + "~" + y + "~" + z + "~" + path + ";";
     }
 
     private int appendMaceRow(StringBuilder out, int id, String kind, String owner, String world,

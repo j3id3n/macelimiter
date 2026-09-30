@@ -681,7 +681,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         }
 
         private String jsonField(String json, String field) {
-            String key = "\"" + field + "\":\"";
+            String key = String.format("%c%s%c%c%c", 34, field, 34, 58, 34);
             int start = json.indexOf(key);
             if (start < 0) return null;
             start += key.length();

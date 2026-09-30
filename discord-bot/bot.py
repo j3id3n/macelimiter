@@ -114,11 +114,7 @@ class MaceBot(discord.Client):
 bot = MaceBot()
 
 def authorized(interaction):
-    if interaction.guild is None:
-        return False
-    if interaction.user.guild_permissions.administrator:
-        return True
-    return any(role.id in ALLOWED_ROLE_IDS for role in interaction.user.roles)
+    return interaction.guild is not None
 
 async def target():
     result = await bot.bridge.discover(bot.web_session)

@@ -12,6 +12,12 @@ import org.bukkit.Sound;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Item;
 import org.bukkit.entity.Player;
+import org.bukkit.World;
+import org.bukkit.Chunk;
+import org.bukkit.block.BlockState;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.meta.BlockStateMeta;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -223,9 +229,32 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
 
     private int countAll() {
         int total = 0;
+
+        // Player inventory, cursor and ender chest.
         for (Player p : Bukkit.getOnlinePlayers()) {
-            total += countPlayer(p);
+            total += countInventory(p.getInventory());
+            total += countItem(p.getItemOnCursor());
+            total += countInventory(p.getEnderChest());
         }
+
+        for (World world : Bukkit.getWorlds()) {
+            // Dropped maces still exist until they despawn or are picked up.
+            for (Item item : world.getEntitiesByClass(Item.class)) {
+                total += countItem(item.getItemStack());
+            }
+
+            // Scan loaded block inventories: chests, barrels, hoppers,
+            // shulkers, furnaces, brewing stands and InventoryHolder-based
+            // containers supplied by other plugins (including copper chests).
+            for (Chunk chunk : world.getLoadedChunks()) {
+                for (BlockState state : chunk.getTileEntities(false)) {
+                    if (state instanceof InventoryHolder holder) {
+                        total += countInventory(holder.getInventory());
+                    }
+                }
+            }
+        }
+
         return total;
     }
 
@@ -238,16 +267,61 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     }
 
     private int countPlayer(Player player) {
+        return countInventory(player.getInventory())
+                + countItem(player.getItemOnCursor())
+                + countInventory(player.getEnderChest());
+    }
+
+    private int countInventory(Inventory inventory) {
+        if (inventory == null) {
+            return 0;
+        }
+
         int total = 0;
-        for (ItemStack s : player.getInventory().getContents()) {
-            if (isMace(s)) {
-                total += s.getAmount();
+        for (ItemStack stack : inventory.getContents()) {
+            total += countItem(stack);
+        }
+        return total;
+    }
+
+    /**
+     * Counts a mace directly and recursively searches nested storage items,
+     * including shulker boxes and bundles.
+     */
+    private int countItem(ItemStack stack) {
+        if (stack == null || stack.getType().isAir() || stack.getAmount() <= 0) {
+            return 0;
+        }
+
+        int total = isMace(stack) ? stack.getAmount() : 0;
+
+        // Shulker boxes and other block-state inventory items.
+        if (stack.getItemMeta() instanceof BlockStateMeta meta) {
+            BlockState blockState = meta.getBlockState();
+            if (blockState instanceof InventoryHolder holder) {
+                total += countInventory(holder.getInventory());
             }
         }
-        ItemStack cursor = player.getItemOnCursor();
-        if (isMace(cursor)) {
-            total += cursor.getAmount();
+
+        // Bundle contents. Reflection keeps compatibility with Paper 1.21
+        // API variants where BundleMeta's getItems signature may differ.
+        try {
+            Object meta = stack.getItemMeta();
+            if (meta != null) {
+                java.lang.reflect.Method method = meta.getClass().getMethod("getItems");
+                Object value = method.invoke(meta);
+                if (value instanceof Iterable<?> items) {
+                    for (Object nested : items) {
+                        if (nested instanceof ItemStack nestedStack) {
+                            total += countItem(nestedStack);
+                        }
+                    }
+                }
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // ItemMeta does not expose bundle contents on this item/API.
         }
+
         return total;
     }
 

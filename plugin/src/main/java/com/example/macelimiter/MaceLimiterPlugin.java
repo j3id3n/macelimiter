@@ -482,4 +482,4 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             return null;
         }
     }
-
+}

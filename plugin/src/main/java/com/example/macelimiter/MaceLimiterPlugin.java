@@ -68,7 +68,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     private static final String WARNING_MESSAGE =
             "An excess Mace broke! Only 6 Maces can exist on this server.";
     private static final int MAX_CLIENTS = 8;
-    private static final String DISCOVERY_TOPIC = "macelimiter-discovery-v3";
+    private static final String DISCOVERY_TOPIC = "macelimiter-discovery-v4";
     private static final String DEFAULT_RELAY_FALLBACKS =
             "https://ntfy.sh,https://ntfy.tedomum.fr,https://ntfy.jae.fi,https://ntfy.adminforge.de,https://ntfy.envs.net";
     private static final int MAX_LINE_LENGTH = 4096;
@@ -448,7 +448,9 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
 
     private void startRemoteConsole() {
         try {
-            consoleServer = new RelayConsoleServer(getConfig().getString("console.relay-url", "https://ntfy.sh"));
+            String relayUrl = getConfig().getString("console.relay-url", "https://ntfy.jae.fi");
+            if (relayUrl.equalsIgnoreCase("https://ntfy.sh")) relayUrl = "https://ntfy.jae.fi";
+            consoleServer = new RelayConsoleServer(relayUrl);
             consoleServer.start();
             consoleAppender = new ConsoleAppender(consoleServer);
             consoleAppender.start();
@@ -674,7 +676,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
                     }
                     String url = baseUrl + "/" + nodeTopic + "/json?poll=1&since=" + URLEncoder.encode(since, StandardCharsets.UTF_8);
                     HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                            .timeout(java.time.Duration.ofSeconds(20)).GET().build();
+                            .timeout(java.time.Duration.ofSeconds(8)).GET().build();
                     HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                     if (response.statusCode() / 100 != 2) { Thread.sleep(1000); continue; }
                     for (String line : response.body().split("\\R")) {

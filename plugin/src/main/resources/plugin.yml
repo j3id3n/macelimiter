@@ -1,6 +1,6 @@
 name: MaceLimiter
 main: com.example.macelimiter.MaceLimiterPlugin
-version: '1.1.7'
+version: '1.1.8'
 api-version: '26.2'
 description: Caps Heavy Maces server-wide, tracks their locations, and exposes an authenticated remote Minecraft console.
 authors: [MaceLimiter]

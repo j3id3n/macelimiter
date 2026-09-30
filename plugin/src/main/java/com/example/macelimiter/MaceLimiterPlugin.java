@@ -33,6 +33,8 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.PlayerInventory;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandSender;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -113,6 +115,14 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         // Final synchronous save.
         lastPersistedCount = -1;
         persistNow(countAllSafe());
+    }
+
+    @Override
+    public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+        if (!command.getName().equalsIgnoreCase("maces")) return false;
+        int count = countAll();
+        sender.sendMessage(Component.text("Maces: " + count + "/" + MAX_MACES, NamedTextColor.GOLD));
+        return true;
     }
 
     // ---------------------------------------------------------------------

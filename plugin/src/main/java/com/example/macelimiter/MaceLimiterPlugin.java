@@ -478,19 +478,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         try {
             return Bukkit.getScheduler().callSyncMethod(this, task).get(5, TimeUnit.SECONDS);
         } catch (Exception e) {
-            getLogger().warning("Remote console main-thread state check failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+            getLogger().warning("Discord main-thread state check failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
             return null;
         }
     }
 
-    private void sendCount(String session) {
-        Integer count = callOnMainThread(this::countAll);
-        if (consoleServer != null && count != null) consoleServer.publish("COUNT|" + session + "|" + count);
-    }
-
-    private void sendMaceState(String session) {
-        String snapshot = callOnMainThread(this::maceSnapshot);
-        if (consoleServer != null && snapshot != null) consoleServer.publish("MACE|" + session + "|" + encode(snapshot));
-    }
-
-}

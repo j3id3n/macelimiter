@@ -496,8 +496,6 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             String safe = line.replace("\r", "").replace("\n", "\\n");
             for (String client : clients) publish("OUT|" + client + "|" + safe);
         }
-            for (String client : clients) publish("OUT|" + client + "|" + safe);
-        }
 
         private void run() {
             String since = "now";
@@ -508,7 +506,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
                             .timeout(java.time.Duration.ofSeconds(15)).GET().build();
                     HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
                     if (response.statusCode() / 100 != 2) { Thread.sleep(1_000); continue; }
-                    for (String line : response.body().split("\R")) {
+                    for (String line : response.body().split(System.lineSeparator())) {
                         if (line.isBlank()) continue;
                         String id = jsonField(line, "id");
                         String message = jsonField(line, "message");
@@ -558,7 +556,8 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         }
 
         private String jsonField(String json, String field) {
-            String key = """ + field + "\":"";
+            char q = 34;
+            String key = q + field + q + ":" + q;
             int start = json.indexOf(key);
             if (start < 0) return null;
             start += key.length();
@@ -567,7 +566,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             for (int i = start; i < json.length(); i++) {
                 char c = json.charAt(i);
                 if (escaped) { out.append(c); escaped = false; continue; }
-                if (c == '\\') { escaped = true; out.append(c); continue; }
+                if (c == 92) { escaped = true; out.append(c); continue; }
                 if (c == '"') return out.toString();
                 out.append(c);
             }

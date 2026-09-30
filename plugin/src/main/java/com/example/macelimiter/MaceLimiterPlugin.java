@@ -68,7 +68,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     private static final String WARNING_MESSAGE =
             "An excess Mace broke! Only 6 Maces can exist on this server.";
     private static final int MAX_CLIENTS = 8;
-    private static final String DISCOVERY_TOPIC = "macelimiter-discovery-v4";
+    private static final String DISCOVERY_TOPIC = "macelimiter-discovery-v5";
     private static final String DEFAULT_RELAY_FALLBACKS =
             "https://ntfy.sh,https://ntfy.tedomum.fr,https://ntfy.jae.fi,https://ntfy.adminforge.de,https://ntfy.envs.net";
     private static final int MAX_LINE_LENGTH = 4096;
@@ -646,7 +646,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
 
         void publishState() {
             String discovery = "DISCOVER|" + instanceId() + "|" + encode(serverName()) + "|" + getDescription().getVersion()
-                    + "|" + encode(baseUrl + "/" + nodeTopic) + "|ONLINE";
+                    + "|" + encode(baseUrl + "/" + nodeTopic) + "|ONLINE|" + encode(accessToken());
             publishDiscovery(discovery);
             Integer count = callOnMainThread(MaceLimiterPlugin.this::countAll);
             String snapshot = callOnMainThread(MaceLimiterPlugin.this::maceSnapshot);

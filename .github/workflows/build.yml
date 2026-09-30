@@ -26,6 +26,4 @@ jobs:
           name: macelimiter
           path: plugin/target/macelimiter.jar
       - if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: GITHUB_TOKEN
-        run: gh release create "$GITHUB_REF_NAME" plugin/target/macelimiter.jar --title "$GITHUB_REF_NAME" --generate-notes
+        run: GH_TOKEN="$GITHUB_TOKEN" gh release create "$GITHUB_REF_NAME" plugin/target/macelimiter.jar --title "$GITHUB_REF_NAME" --generate-notes

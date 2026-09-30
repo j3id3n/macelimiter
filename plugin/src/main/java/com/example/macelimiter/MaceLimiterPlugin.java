@@ -439,7 +439,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
 
     private static final class ConsoleAppender extends AbstractAppender {
         private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss");
-        private static final Pattern ANSI = Pattern.compile("\u001B\[[;\d]*[A-Za-z]");
+        private static final Pattern ANSI = Pattern.compile("");
         private final RelayConsoleServer server;
 
         ConsoleAppender(RelayConsoleServer server) {
@@ -458,10 +458,10 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
                 if (thrown != null) {
                     StringWriter sw = new StringWriter();
                     thrown.printStackTrace(new PrintWriter(sw));
-                    sb.append('
-').append(sw);
+                    sb.append('\n').append(sw);
+
                 }
-                String text = ANSI.matcher(sb).replaceAll("");
+                String text = sb.toString();
                 for (String line : text.split("\r?\n")) server.broadcast(line);
             } catch (Exception ignored) {}
         }
@@ -493,9 +493,9 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         void shutdown() { running = false; }
 
         void broadcast(String line) {
-            String safe = line.replace("
-", "").replace("
-", "\n");
+            String safe = line.replace("\r", "").replace("\n", "\\n");
+            for (String client : clients) publish("OUT|" + client + "|" + safe);
+        }
             for (String client : clients) publish("OUT|" + client + "|" + safe);
         }
 
@@ -558,7 +558,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
         }
 
         private String jsonField(String json, String field) {
-            String key = """ + field + "":"";
+            String key = """ + field + "\":"";
             int start = json.indexOf(key);
             if (start < 0) return null;
             start += key.length();
@@ -567,7 +567,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             for (int i = start; i < json.length(); i++) {
                 char c = json.charAt(i);
                 if (escaped) { out.append(c); escaped = false; continue; }
-                if (c == '\') { escaped = true; out.append(c); continue; }
+                if (c == '\\') { escaped = true; out.append(c); continue; }
                 if (c == '"') return out.toString();
                 out.append(c);
             }

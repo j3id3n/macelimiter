@@ -21,29 +21,16 @@ jobs:
           cache: maven
       - run: mvn -B -f plugin/pom.xml clean package
       - run: test -s plugin/target/macelimiter.jar
-      - run: |
-          test -f discord-bot/bot.py
-          python3 -m py_compile discord-bot/bot.py
-          python3 - <<'PY'
-          import zipfile
-          from pathlib import Path
-          with zipfile.ZipFile("plugin/target/macelimiter-discord-bot.zip", "w", zipfile.ZIP_DEFLATED) as z:
-              for path in Path("discord-bot").rglob("*"):
-                  if path.is_file():
-                      z.write(path, path.as_posix())
-          PY
       - uses: actions/upload-artifact@v4
         with:
           name: macelimiter
-          path: |
-            plugin/target/macelimiter.jar
-            plugin/target/macelimiter-discord-bot.zip
+          path: plugin/target/macelimiter.jar
       - if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" plugin/target/macelimiter.jar plugin/target/macelimiter-discord-bot.zip --clobber
+            gh release upload "$GITHUB_REF_NAME" plugin/target/macelimiter.jar --clobber
           else
-            gh release create "$GITHUB_REF_NAME" plugin/target/macelimiter.jar plugin/target/macelimiter-discord-bot.zip --title "$GITHUB_REF_NAME" --generate-notes
+            gh release create "$GITHUB_REF_NAME" plugin/target/macelimiter.jar --title "$GITHUB_REF_NAME" --generate-notes
           fi

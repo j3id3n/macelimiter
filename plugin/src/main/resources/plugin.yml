@@ -1,8 +1,8 @@
 name: MaceLimiter
 main: com.example.macelimiter.MaceLimiterPlugin
-version: '1.2.2'
+version: '2.0.0'
 api-version: '26.2'
-description: Caps Heavy Maces server-wide, tracks their locations, and exposes an authenticated remote Minecraft console.
+description: Global Heavy Mace limiter with a built-in Discord bot and /maces command.
 authors: [MaceLimiter]
 commands:
   maces:

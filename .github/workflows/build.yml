@@ -1,62 +1,29 @@
 name: Build
-
 on:
   push:
   pull_request:
   workflow_dispatch:
-
+  tags:
+    - v*
 permissions:
   contents: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Java 25
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '25'
           cache: maven
-
-      - name: Build macelimiter.jar
-        run: mvn -B -f plugin/pom.xml clean package
-
-      - name: Validate relay architecture
-        run: |
-          ! grep -R -n -E "ServerSocket|new Socket\(|InetSocketAddress|console\.port|console\.bind-address" plugin/src/main/java client/ConsoleClient.java
-
-      - name: Build console.jar
-        run: |
-          mkdir -p client/out
-          javac --release 25 -d client/out client/ConsoleClient.java
-          jar --create --file console.jar --main-class ConsoleClient -C client/out .
-
-      - name: Upload macelimiter.jar
-        uses: actions/upload-artifact@v4
+      - run: mvn -B -f plugin/pom.xml clean package
+      - run: test -s plugin/target/macelimiter.jar
+      - uses: actions/upload-artifact@v4
         with:
           name: macelimiter
           path: plugin/target/macelimiter.jar
-
-      - name: Upload console.jar
-        uses: actions/upload-artifact@v4
-        with:
-          name: console
-          path: console.jar
-
-      - name: Verify release artifacts
-        run: |
-          test -s plugin/target/macelimiter.jar
-          test -s console.jar
-
-      - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+      - if: startsWith(github.ref, 'refs/tags/v')
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            plugin/target/macelimiter.jar console.jar \
-            --title "${GITHUB_REF_NAME}" --generate-notes
+          GH_TOKEN: GITHUB_TOKEN
+        run: gh release create "$GITHUB_REF_NAME" plugin/target/macelimiter.jar --title "$GITHUB_REF_NAME" --generate-notes

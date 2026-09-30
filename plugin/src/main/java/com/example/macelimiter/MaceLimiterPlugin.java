@@ -68,7 +68,7 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
     private static final String WARNING_MESSAGE =
             "An excess Mace broke! Only 6 Maces can exist on this server.";
     private static final int MAX_CLIENTS = 8;
-    private static final String DISCOVERY_TOPIC = "macelimiter-discovery-v2";
+    private static final String DISCOVERY_TOPIC = "macelimiter-discovery-v3";
     private static final int MAX_LINE_LENGTH = 4096;
 
     private final Object fileLock = new Object();
@@ -669,10 +669,23 @@ public final class MaceLimiterPlugin extends JavaPlugin implements Listener {
             try {
                 HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/" + topic))
                         .header("Content-Type", "text/plain; charset=utf-8")
+                        .header("User-Agent", "MaceLimiter/" + getDescription().getVersion())
+                        .header("Cache", "no")
                         .POST(HttpRequest.BodyPublishers.ofString(message, StandardCharsets.UTF_8))
                         .build();
-                HTTP.sendAsync(request, HttpResponse.BodyHandlers.discarding());
-            } catch (Exception ignored) {}
+                HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                if (topic.equals(DISCOVERY_TOPIC)) {
+                    if (response.statusCode() / 100 == 2) {
+                        getLogger().info("Remote console discovery registered: " + instanceId());
+                    } else {
+                        getLogger().warning("Remote console discovery failed: HTTP " + response.statusCode() + " from " + baseUrl);
+                    }
+                }
+            } catch (Exception e) {
+                if (topic.equals(DISCOVERY_TOPIC)) {
+                    getLogger().warning("Remote console discovery failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                }
+            }
         }
 
         private void publish(String message) {

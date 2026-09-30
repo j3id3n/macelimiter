@@ -4,3 +4,12 @@ version: '1.2.1'
 api-version: '26.2'
 description: Caps Heavy Maces server-wide, tracks their locations, and exposes an authenticated remote Minecraft console.
 authors: [MaceLimiter]
+commands:
+  maces:
+    description: Show the current global mace count
+    usage: /maces
+    permission: macelimiter.maces
+permissions:
+  macelimiter.maces:
+    description: Allows players to view the global mace count
+    default: true

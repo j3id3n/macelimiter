@@ -1,6 +1,6 @@
 name: MaceLimiter
 main: com.example.macelimiter.MaceLimiterPlugin
-version: '2.0.0'
+version: '2.0.1'
 api-version: '26.2'
 description: Global Heavy Mace limiter with a built-in Discord bot and /maces command.
 authors: [MaceLimiter]
